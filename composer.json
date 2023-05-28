@@ -1,0 +1,17 @@
+{
+    "name": "onebiznet/laravel-cart",
+    "description": "Cart implementation for laravel project",
+    "license": "MIT",
+    "autoload": {
+        "psr-4": {
+            "Onebiznet\\LaravelCart\\": "src/"
+        }
+    },
+    "authors": [
+        {
+            "name": "drhtoo",
+            "email": "drpyaesonehtoo@gmail.com"
+        }
+    ],
+    "require": {}
+}
