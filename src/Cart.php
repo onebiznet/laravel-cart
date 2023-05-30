@@ -4,111 +4,172 @@ namespace OneBiznet\LaravelCart;
 
 use Illuminate\Contracts\Events\Dispatcher;
 use Illuminate\Database\Eloquent\Collection;
+use Illuminate\Session\SessionManager;
 use Illuminate\Support\ItemNotFoundException;
 use Illuminate\Support\Str;
 use Illuminate\Support\Traits\Macroable;
 use OneBiznet\LaravelCart\Models;
 use OneBiznet\LaravelCart\Concerns\HasEvents;
 use OneBiznet\LaravelCart\Contracts\Buyable;
+use OneBiznet\LaravelCart\Contracts\InstanceIdentifier;
 
 class Cart
 {
-    use Macroable,
-        HasEvents;
+    use Macroable;
+
+    const DEFAULT_INSTANCE = 'default';
 
     /**
-     * The root session name.
+     * Instance of the session manager.
+     *
+     * @var \Illuminate\Session\SessionManager
+     */
+    private $session;
+
+    /**
+     * Instance of the event dispatcher.
+     *
+     * @var \Illuminate\Contracts\Events\Dispatcher
+     */
+    private $events;
+
+    /**
+     * Holds the current cart instance.
      *
      * @var string
      */
-    protected string $sessionKey;
+    private $instance;
 
     /**
-     * The default cart name.
+     * Cart instance
      *
-     * @var string
+     * @var \OneBiznet\LaravelCart\Models\Cart
      */
-    protected string $defaultCartName = 'default';
-
-    /**
-     * The name of current cart instance.
-     *
-     * @var string
-     */
-    protected string $cartName;
-
-    protected Collection $carts;
+    private $cart;
 
     /**
      * Create cart instance.
      *
      * @return void
      */
-    public function __construct(Dispatcher $events)
+    public function __construct(SessionManager $session, Dispatcher $events)
     {
+        $this->session = $session;
         $this->events = $events;
-        $this->sessionKey = '_' . md5(config('app.name') . __NAMESPACE__);
-        $defaultCartName = config('cart.default_cart_name');
 
-        if (is_string($defaultCartName) && !empty($defaultCartName)) {
-            $this->defaultCartName = $defaultCartName;
-        }
-
-        $this->name()->initSessions();
+        $this->instance(self::DEFAULT_INSTANCE);
     }
 
     /**
-     * Initialize attributes for current cart instance.
+     * Set the current cart instance.
      *
-     * @return bool return false if attributes already exist without initialization
+     * @param string|null $instance
+     *
+     * @return \OneBiznet\LaravelCart\Cart
      */
-    protected function initSessions(): void
+    public function instance($instance = null): self
     {
-        $uuid = $this->getCartKey();
+        $instance = $instance ?: self::DEFAULT_INSTANCE;
 
-        $cartModel = $this->getCartModel();
-
-        $this->carts = auth()->check() ? $cartModel::where('user_id', auth()->id())->get() : new Collection();
-
-        $this->carts->each(function ($cart) use ($uuid) {
-            $cart->uuid = $uuid;
-            if ($cart->isDirty()) $cart->save();
-        });
-
-        if (is_null($this->carts) || $this->carts->isEmpty()) {
-            $this->carts = $cartModel::where('uuid', $uuid)->get();
-            if ($user_id = auth()->id())
-                $this->carts->each(function ($cart) use ($user_id) {
-                    $cart->user_id = $user_id;
-                    if ($cart->isDirty()) $cart->save();
-                });
+        if ($instance instanceof InstanceIdentifier) {
+            $instance = $instance->getInstanceIdentifier();
         }
+
+        $this->instance = 'cart.' . $instance;
+
+        return $this;
+    }
+
+    /**
+     * Get the current cart instance.
+     *
+     * @return string
+     */
+    public function getInstance(): string
+    {
+        return str_replace('cart.', '', $this->instance);
+    }
+
+    /**
+     * Add an item to the cart.
+     *
+     * @param mixed     $id
+     * @param mixed     $name
+     * @param int|float $qty
+     * @param float     $price
+     * @param array     $options
+     *
+     * @return \OneBiznet\LaravelCart\Models\CartItem
+     */
+    public function add(mixed $id, mixed $name = null, $qty = null, $price = null, array $options = [])
+    {
+        if ($this->isMulti($id)) {
+            return array_map(function ($item) {
+                return $this->add($item);
+            }, $id);
+        }
+
+        $this->cart = $this->cart ?? $this->getCart();
+
+        return $this->cart->add($id, $name, $qty, $price, $options);
+    }
+
+    public function contents()
+    {
+        $model = $this->getCartItemModel();
+
+        return $model::where('cart_id', $this->getCartKey())->get();
+    }
+
+    public function count()
+    {
+        $this->cart = $this->cart ?? $this->getCart();
+
+        return $this->cart->items->sum('quantity');
+    }
+
+    /**
+     * Destroy the current cart instance.
+     *
+     * @return void
+     */
+    public function destroy()
+    {
+        $this->session->remove($this->instance);
     }
 
     protected function getCart()
     {
-        try {
-            return $this->carts->firstOrFail('name', $this->cartName);
-            
-        } catch (ItemNotFoundException) {
-            $cartModel = $this->getCartModel();
+        $model = $this->getCartModel();
 
-            $instance = $cartModel::firstOrNew(['name' => $this->cartName]);
-            $instance->uuid = $this->getCartKey();
-            $instance->user_id = auth()->id();
+        $this->cart = auth()->check()
+            ? $model::where('user_id', auth()->id())->firstOr(function () use ($model) {
+                return $this->getSessionCart();
+            })
+            : $this->getSessionCart();
 
-            return $instance;
-        }
-
-        return null;
+        return $this->cart;
     }
 
-    protected function getCartKey(): string
+    protected function getSessionCart()
     {
-        if (!session()->has($this->sessionKey)) {
-            session()->put($this->sessionKey, Str::uuid());
+        $model = $this->getCartModel();
+
+        return $model::where('id', $this->getCartKey())->firstOr(function () use ($model) {
+            $cart = new $model([
+                'name' => $this->getInstance() ?: self::DEFAULT_INSTANCE,
+            ]);
+
+            return $cart;
+        });
+    }
+
+    public function getCartKey(): string
+    {
+        if (!$this->session->has($this->instance)) {
+            $this->session->put($this->instance, Str::uuid());
         }
-        return session()->get($this->sessionKey);
+        return $this->session->get($this->instance);
     }
 
     public function getCartModel(): string
@@ -116,54 +177,24 @@ class Cart
         return config('cart.cart_model');
     }
 
-    public function getCartContentModel(): string
+    public function getCartItemModel(): string
     {
-        return config('cart.cart_content_model');
+        return config('cart.cart_item_model');
     }
 
-    public function name(string $name = 'default'): self
+    /**
+     * Check if the item is a multidimensional array or an array of Buyables.
+     *
+     * @param mixed $item
+     *
+     * @return bool
+     */
+    private function isMulti($item)
     {
-        $this->cartName = $name;
-
-        return $this;
-    }
-
-    public function getContents()
-    {
-        return $this->carts->flatMap->contents;
-    }
-
-    public function add(string | Buyable $item, int $quantity = 1, float $price = 0.0)
-    {
-        $attributes = [];
-
-        if ($item instanceof Buyable) {
-            $attributes = [
-                'name' => $item->getBuyableDescription(),
-                'item_id' => $item->getBuyableIdentifier(),
-                'item_type' => $item->getMorphClass(),
-                'price' => $item->getBuyablePrice() ?? $price,
-                'quantity' => $quantity,
-            ];
-
-        } else {
-            $attributes = [
-                'name' => $item,
-                'price' => $price,
-                'quantity' => $quantity,
-            ];
+        if (!is_array($item)) {
+            return false;
         }
 
-        $this->fireEvent('cart.adding', $attributes);
-
-        if ($itemAdded = $this->getCart()->add($item, $quantity, $price)) {
-            $this->fireEvent('cart.added', $itemAdded);
-        }
-
-    }
-
-    public function count(): int
-    {
-        return $this->getContents()->sum('quantity');
+        return is_array(head($item)) || head($item) instanceof Buyable;
     }
 }
