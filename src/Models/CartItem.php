@@ -61,4 +61,9 @@ class CartItem extends Model
     {
         return $this->hasThumbnail() ? $this->item->thumbnail_url : null;
     }
+
+    public function getLineTotalAttribute()
+    {
+        return ($this->price ?: 0.0) * ($this->quantity ?: 1);
+    }
 }
